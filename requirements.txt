@@ -1,3 +1,11 @@
+# Coeur du hackathon (tests + interface). La CI n'a besoin que de pytest.
 pytest>=7.0
 streamlit>=1.28
 pandas>=2.0
+
+# Couche entreprise Aegis.
+numpy>=1.24          # features + repli d'anomalie (Mahalanobis / chi-2)
+
+# Optionnel : améliore la couche ML (IsolationForest). En son absence, Aegis
+# bascule automatiquement sur un repli numpy pur — l'app ne plante jamais.
+scikit-learn>=1.3

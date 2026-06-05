@@ -4,6 +4,11 @@ __pycache__/
 .venv/
 venv/
 
+# Aegis — état local et artefacts
+.aegis_store.db*
+*.log
+.agents/
+
 # Réservé organisateurs — ne pas publier sur le dépôt participants
 organisateur/
 Ressources/
