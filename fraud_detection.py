@@ -256,3 +256,269 @@ def _verdict(tid, score, suspicious, reason):
         "is_suspicious": bool(suspicious),
         "reason": reason,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Analyse étendue (UI, démo, signaux secondaires — n'affecte pas detect_fraud)
+# ──────────────────────────────────────────────────────────────────────────
+NAIVE_GEO_HOURS = 3.0
+NIGHT_HOUR_START = 0
+NIGHT_HOUR_END = 5
+DUPLICATE_WINDOW_S = 90
+HIGH_RISK_MERCHANT_KEYWORDS = (
+    "bijouterie", "jewelry", "crypto", "casino", "betting", "forex",
+)
+
+SIGNAL_LABELS = {
+    "amount": "Montant vs médiane client",
+    "geo": "Voyage impossible (physique)",
+    "velocity": "Rafale de transactions",
+    "missing": "Champs manquants",
+    "negative": "Montant nul ou négatif",
+    "night": "Horaire inhabituel (nuit)",
+    "card_absent": "Carte absente + gros montant",
+    "merchant": "Commerçant à risque",
+    "duplicate": "Doublon suspect",
+    "currency": "Devise inhabituelle",
+}
+
+
+def _build_context(transactions):
+    """Pré-calculs partagés pour l'analyse étendue."""
+    txs = list(transactions or [])
+    history_amounts = {}
+    user_currencies = {}
+    user_hours = {}
+    user_events = {}
+    geo_flag = set()
+    velocity_flag = set()
+    travel_pairs = {}
+
+    for idx, tx in enumerate(txs):
+        if not isinstance(tx, dict):
+            continue
+        uid = tx.get("user_id")
+        amount = tx.get("amount")
+        if isinstance(amount, (int, float)) and amount > 0:
+            history_amounts.setdefault(uid, []).append(float(amount))
+        cur = tx.get("currency")
+        if cur:
+            user_currencies.setdefault(uid, set()).add(cur)
+        dt = _parse_timestamp(tx.get("timestamp"))
+        if dt and uid:
+            user_hours.setdefault(uid, []).append(dt.hour)
+        user_events.setdefault(uid, []).append((idx, dt, tx.get("country"), tx))
+
+    for uid, events in user_events.items():
+        timed = sorted([e for e in events if e[1] is not None], key=lambda e: e[1])
+        for (i1, d1, c1, _), (i2, d2, c2, tx2) in zip(timed, timed[1:]):
+            gap = abs((d2 - d1).total_seconds())
+            if _impossible_travel(c1, c2, gap):
+                geo_flag.add(i1)
+                geo_flag.add(i2)
+                detail = _travel_detail(c1, c2, gap)
+                travel_pairs[i1] = {**detail, "other_id": tx2.get("transaction_id")}
+                travel_pairs[i2] = {**detail, "other_id": _tx_at(txs, i1, "transaction_id")}
+        times = sorted(d for _, d, _, _ in events if d is not None)
+        for idx, dt, _, _ in events:
+            if dt is None:
+                continue
+            close = sum(1 for t in times
+                        if abs((t - dt).total_seconds()) <= VELOCITY_WINDOW_S)
+            if close >= VELOCITY_MIN_COUNT:
+                velocity_flag.add(idx)
+
+    return {
+        "transactions": txs,
+        "history_amounts": history_amounts,
+        "user_currencies": user_currencies,
+        "user_hours": user_hours,
+        "geo_flag": geo_flag,
+        "velocity_flag": velocity_flag,
+        "travel_pairs": travel_pairs,
+    }
+
+
+def _tx_at(txs, idx, key):
+    if 0 <= idx < len(txs) and isinstance(txs[idx], dict):
+        return txs[idx].get(key)
+    return None
+
+
+def _travel_detail(c1, c2, gap_seconds):
+    gap_h = gap_seconds / 3600.0
+    p1, p2 = COUNTRY_CENTROIDS.get(c1), COUNTRY_CENTROIDS.get(c2)
+    if p1 and p2:
+        dist = _haversine_km(p1, p2)
+        min_h = dist / MAX_TRAVEL_SPEED_KMH
+        return {
+            "country_from": c1, "country_to": c2,
+            "distance_km": round(dist, 0),
+            "min_hours": round(min_h, 1),
+            "actual_hours": round(gap_h, 2),
+            "impossible": gap_h < min_h,
+        }
+    return {
+        "country_from": c1, "country_to": c2,
+        "distance_km": None,
+        "min_hours": FALLBACK_GEO_HOURS,
+        "actual_hours": round(gap_h, 2),
+        "impossible": gap_h < FALLBACK_GEO_HOURS,
+    }
+
+
+def _median_excluding(amount, peers):
+    if amount in peers:
+        peers = list(peers)
+        peers.remove(amount)
+    return statistics.median(peers) if peers else None
+
+
+def analyze_signals(transactions, index):
+    """Décomposition des signaux de risque pour une transaction (affichage UI)."""
+    ctx = _build_context(transactions)
+    txs = ctx["transactions"]
+    if index < 0 or index >= len(txs) or not isinstance(txs[index], dict):
+        return {}
+    tx = txs[index]
+    uid = tx.get("user_id")
+    amount = tx.get("amount")
+    signals = {}
+
+    if isinstance(amount, (int, float)) and amount <= 0:
+        signals["negative"] = 0.9
+
+    peers = list(ctx["history_amounts"].get(uid, []))
+    if isinstance(amount, (int, float)) and amount > 0 and len(peers) >= AMOUNT_MIN_HISTORY:
+        med = _median_excluding(amount, peers)
+        if med and med > 0:
+            ratio = amount / med
+            if ratio >= AMOUNT_MULTIPLIER and (amount - med) >= AMOUNT_ABS_FLOOR:
+                signals["amount"] = min(0.9, 0.5 + ratio / 20)
+
+    if index in ctx["geo_flag"]:
+        signals["geo"] = 0.88
+    if index in ctx["velocity_flag"]:
+        signals["velocity"] = 0.7
+
+    missing = [f for f in REQUIRED_FIELDS if tx.get(f) is None]
+    if missing:
+        signals["missing"] = 0.85
+
+    dt = _parse_timestamp(tx.get("timestamp"))
+    if dt and uid:
+        hours = ctx["user_hours"].get(uid, [])
+        if hours:
+            typical = statistics.median(hours)
+            if (NIGHT_HOUR_START <= dt.hour <= NIGHT_HOUR_END
+                    and typical >= 8):
+                signals["night"] = 0.35
+
+    if tx.get("card_present") is False and isinstance(amount, (int, float)) and amount > 0:
+        med = _median_excluding(amount, peers) if peers else None
+        if med and amount >= med * 3:
+            signals["card_absent"] = 0.45
+
+    merchant = (tx.get("merchant") or "").lower()
+    if any(k in merchant for k in HIGH_RISK_MERCHANT_KEYWORDS):
+        signals["merchant"] = 0.38
+
+    if dt:
+        for j, other in enumerate(txs):
+            if j == index or not isinstance(other, dict):
+                continue
+            if other.get("user_id") != uid:
+                continue
+            odt = _parse_timestamp(other.get("timestamp"))
+            if not odt:
+                continue
+            if abs((odt - dt).total_seconds()) <= DUPLICATE_WINDOW_S:
+                if (other.get("amount") == amount
+                        and other.get("merchant") == tx.get("merchant")):
+                    signals["duplicate"] = 0.52
+                    break
+
+    cur = tx.get("currency")
+    known = ctx["user_currencies"].get(uid, set())
+    if cur and len(known) >= 2 and cur not in known:
+        signals["currency"] = 0.32
+
+    return signals
+
+
+def composite_score(signals):
+    """Score composite pondéré (affichage uniquement, pas le verdict officiel)."""
+    if not signals:
+        return 0.0
+    weights = {
+        "negative": 0.20, "amount": 0.18, "geo": 0.16, "missing": 0.12,
+        "velocity": 0.10, "night": 0.06, "card_absent": 0.06,
+        "merchant": 0.05, "duplicate": 0.04, "currency": 0.03,
+    }
+    total_w = sum(weights.get(k, 0.05) for k in signals)
+    if total_w == 0:
+        return 0.0
+    score = sum(signals[k] * weights.get(k, 0.05) for k in signals) / total_w
+    return round(min(1.0, score), 2)
+
+
+def get_travel_info(transactions, index):
+    """Détails du voyage impossible pour une transaction."""
+    ctx = _build_context(transactions)
+    return ctx["travel_pairs"].get(index)
+
+
+def build_client_profile(transactions, user_id):
+    """Profil 360° d'un client pour l'interface."""
+    txs = [t for t in (transactions or []) if isinstance(t, dict)
+           and t.get("user_id") == user_id]
+    amounts = [t["amount"] for t in txs
+               if isinstance(t.get("amount"), (int, float)) and t["amount"] > 0]
+    countries = sorted({t.get("country") for t in txs if t.get("country")})
+    currencies = sorted({t.get("currency") for t in txs if t.get("currency")})
+    timeline = []
+    for t in txs:
+        timeline.append({
+            "transaction_id": t.get("transaction_id"),
+            "timestamp": t.get("timestamp"),
+            "amount": t.get("amount"),
+            "country": t.get("country"),
+            "merchant": t.get("merchant"),
+        })
+    timeline.sort(key=lambda x: x.get("timestamp") or "")
+    return {
+        "user_id": user_id,
+        "transaction_count": len(txs),
+        "median_amount": statistics.median(amounts) if amounts else None,
+        "countries": countries,
+        "currencies": currencies,
+        "timeline": timeline,
+    }
+
+
+def detect_fraud_naive(transactions, hours=NAIVE_GEO_HOURS):
+    """Détecteur naïf (seuil fixe en heures) pour comparaison en démo."""
+    txs = list(transactions or [])
+    results = []
+    by_user = {}
+    for idx, tx in enumerate(txs):
+        if not isinstance(tx, dict):
+            results.append({"index": idx, "is_suspicious": False, "reason": "ok"})
+            continue
+        uid = tx.get("user_id")
+        dt = _parse_timestamp(tx.get("timestamp"))
+        country = tx.get("country")
+        suspicious = False
+        reason = "ok"
+        if uid and dt and country:
+            hist = by_user.setdefault(uid, [])
+            for prev_dt, prev_c in hist:
+                if prev_c != country:
+                    gap_h = abs((dt - prev_dt).total_seconds()) / 3600.0
+                    if gap_h < hours:
+                        suspicious = True
+                        reason = f"Pays différents en moins de {hours:.0f}h (naïf)"
+                        break
+            hist.append((dt, country))
+        results.append({"index": idx, "is_suspicious": suspicious, "reason": reason})
+    return results
