@@ -9,3 +9,6 @@ numpy>=1.24          # features + repli d'anomalie (Mahalanobis / chi-2)
 # Optionnel : améliore la couche ML (IsolationForest). En son absence, Aegis
 # bascule automatiquement sur un repli numpy pur — l'app ne plante jamais.
 scikit-learn>=1.3
+
+# Optionnel : génération de PDF d'audit. Sans lui, un HTML imprimable est servi.
+reportlab>=4.0

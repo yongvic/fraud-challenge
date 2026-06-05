@@ -12,6 +12,7 @@ from __future__ import annotations
 import streamlit as st
 
 from aegis.casemgmt import CASE_STATUSES
+from aegis.comms import audit_artifact
 from aegis.ui.components import alert_card, empty_state, kpi_strip, page_header
 
 
@@ -95,4 +96,11 @@ def render(ctx) -> None:
                 store.assign(tid, analyst, analyst)
                 store.update_status(tid, "En investigation", analyst)
                 st.rerun()
+            artifact = audit_artifact(d, case)
+            if st.download_button("Rapport d'audit", data=artifact["data"],
+                                  file_name=artifact["filename"],
+                                  mime=artifact["mime"], key=f"audit_{tid}",
+                                  use_container_width=True):
+                store.log_communication(tid, "PDF audit", d["user_masked"],
+                                        f"Rapport d'audit {tid}", actor=analyst)
         st.divider()

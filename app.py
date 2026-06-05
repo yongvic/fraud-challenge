@@ -25,6 +25,7 @@ from aegis.engine import DecisionEngine
 from aegis.ui import theme
 from aegis.ui.pages import (
     analyst,
+    communications,
     compliance,
     demo,
     executive,
@@ -40,6 +41,7 @@ PERSONAS = {
     "Console Analyste": analyst,
     "Atelier d'investigation": investigator,
     "Supervision temps réel": monitoring,
+    "Communications & réponse": communications,
     "Tableau de bord Direction": executive,
     "Conformité & Audit": compliance,
     "Démo guidée": demo,
@@ -83,9 +85,11 @@ def build_dataframe(decisions: list[dict]) -> pd.DataFrame:
     } for d in decisions])
 
 
-def sidebar() -> tuple[str, str, bytes | None]:
+def sidebar() -> tuple[str, str, bytes | None, str]:
     with st.sidebar:
         theme.brand_header()
+        st.divider()
+        theme_mode = theme.theme_selector()
         st.divider()
 
         st.caption("SOURCE DE DONNÉES")
@@ -122,15 +126,15 @@ def sidebar() -> tuple[str, str, bytes | None]:
             get_store().reset()
             st.toast("Dossiers et piste d'audit réinitialisés.")
 
-    return persona, source, payload
+    return persona, source, payload, theme_mode
 
 
 def main() -> None:
     st.set_page_config(page_title="Aegis — Financial Crime Intelligence",
                        page_icon="🛡️", layout="wide")
-    theme.inject()
 
-    persona, source, payload = sidebar()
+    persona, source, payload, theme_mode = sidebar()
+    theme.inject(theme_mode)
 
     transactions = load_transactions_cached(source, payload)
     engine = get_engine()
@@ -145,6 +149,7 @@ def main() -> None:
         "store": store,
         "df": df,
         "config": CONFIG,
+        "theme_mode": theme_mode,
     }
 
     PERSONAS[persona].render(ctx)

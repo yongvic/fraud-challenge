@@ -18,11 +18,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Cycle de vie d'un dossier.
-CASE_STATUSES = ["Nouveau", "En investigation", "Fraude confirmée", "Faux positif"]
+CASE_STATUSES = ["Nouveau", "En investigation", "Contesté",
+                 "Fraude confirmée", "Faux positif"]
 
 # Dispositions terminales (utilisées pour la boucle de feedback / metriques).
 TERMINAL_FRAUD = "Fraude confirmée"
 TERMINAL_LEGIT = "Faux positif"
+
+# Canaux de communication sortants.
+COMM_CHANNELS = ["Email client", "PDF audit", "Notification interne"]
 
 
 def _now() -> str:
@@ -74,6 +78,34 @@ class CaseStore:
                     action      TEXT,
                     transaction_id TEXT,
                     detail      TEXT
+                )
+                """
+            )
+            c.execute(
+                """
+                CREATE TABLE IF NOT EXISTS communications (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts             TEXT,
+                    transaction_id TEXT,
+                    channel        TEXT,
+                    recipient      TEXT,
+                    subject        TEXT,
+                    token          TEXT,
+                    status         TEXT
+                )
+                """
+            )
+            c.execute(
+                """
+                CREATE TABLE IF NOT EXISTS contestations (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts             TEXT,
+                    transaction_id TEXT,
+                    token          TEXT,
+                    recognized     TEXT,
+                    message        TEXT,
+                    evidence       TEXT,
+                    outcome        TEXT
                 )
                 """
             )
@@ -187,6 +219,64 @@ class CaseStore:
             )
         self.log(actor, f"Assigné à {assignee}", transaction_id)
 
+    # ── Communications sortantes ───────────────────────────────────────
+    def log_communication(self, transaction_id: str, channel: str,
+                          recipient: str, subject: str, token: str = "",
+                          actor: str = "system") -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO communications (ts, transaction_id, channel, "
+                "recipient, subject, token, status) VALUES (?,?,?,?,?,?,?)",
+                (_now(), transaction_id, channel, recipient, subject, token, "Envoyé"),
+            )
+        self.log(actor, f"Communication: {channel}", transaction_id, subject)
+
+    def list_communications(self, transaction_id: str | None = None) -> list[dict]:
+        query = "SELECT * FROM communications"
+        params: tuple = ()
+        if transaction_id:
+            query += " WHERE transaction_id = ?"
+            params = (transaction_id,)
+        query += " ORDER BY id DESC"
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(query, params).fetchall()]
+
+    # ── Contestations (droit de réponse client) ────────────────────────
+    def add_contestation(self, transaction_id: str, token: str, recognized: bool,
+                         message: str, evidence: str = "") -> str:
+        """Enregistre une réclamation client et fait évoluer le dossier."""
+        outcome = ("Réexamen prioritaire (non reconnu)" if not recognized
+                   else "Réexamen standard (reconnu, justifié)")
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO contestations (ts, transaction_id, token, recognized, "
+                "message, evidence, outcome) VALUES (?,?,?,?,?,?,?)",
+                (_now(), transaction_id, token, "oui" if recognized else "non",
+                 message, evidence, outcome),
+            )
+        self.update_status(transaction_id, "Contesté", "client",
+                           f"Réclamation client: {outcome}")
+        return outcome
+
+    def list_contestations(self, transaction_id: str | None = None) -> list[dict]:
+        query = "SELECT * FROM contestations"
+        params: tuple = ()
+        if transaction_id:
+            query += " WHERE transaction_id = ?"
+            params = (transaction_id,)
+        query += " ORDER BY id DESC"
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(query, params).fetchall()]
+
+    def case_timeline(self, transaction_id: str) -> list[dict]:
+        """Chronologie consolidée d'un dossier (audit + communications)."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT ts, action AS what, detail FROM audit_log "
+                "WHERE transaction_id = ? ORDER BY id ASC", (transaction_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── Boucle de feedback / métriques ─────────────────────────────────
     def feedback_metrics(self) -> dict:
         """Métriques de qualité issues des dispositions analystes."""
@@ -212,4 +302,6 @@ class CaseStore:
         with self._conn() as c:
             c.execute("DELETE FROM cases")
             c.execute("DELETE FROM audit_log")
+            c.execute("DELETE FROM communications")
+            c.execute("DELETE FROM contestations")
         self.log("system", "Réinitialisation du magasin")

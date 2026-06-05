@@ -12,14 +12,16 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from aegis.config import CONFIG, RISK_COLORS
+from aegis.config import CONFIG
 from aegis.ui.components import kpi_strip, page_header
+from aegis.ui.theme import style_chart, tokens
 
 
 def render(ctx) -> None:
     decisions = ctx["decisions"]
     df = ctx["df"]
     cfg = CONFIG
+    theme_mode = ctx.get("theme_mode")
 
     page_header(
         "Pilotage",
@@ -48,7 +50,7 @@ def render(ctx) -> None:
     col_a, col_b = st.columns(2)
 
     with col_a:
-        st.markdown("###### Risque par motif")
+        st.markdown("<div class='eyebrow'>Analyse</div><div class='page-title' style='font-size:1.1rem'>Risque par motif</div>", unsafe_allow_html=True)
         flagged = df[df["Suspecte"]]
         if len(flagged):
             counts = flagged["Motif"].value_counts().reset_index()
@@ -62,12 +64,12 @@ def render(ctx) -> None:
                 )
                 .properties(height=240)
             )
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(style_chart(chart, theme_mode), use_container_width=True)
         else:
             st.caption("Aucune alerte.")
 
     with col_b:
-        st.markdown("###### Exposition par pays")
+        st.markdown("<div class='eyebrow'>Analyse</div><div class='page-title' style='font-size:1.1rem'>Exposition par pays</div>", unsafe_allow_html=True)
         flagged = df[df["Suspecte"]].copy()
         flagged["Montant"] = flagged["Montant"].apply(
             lambda x: x if isinstance(x, (int, float)) and x > 0 else 0)
@@ -83,16 +85,17 @@ def render(ctx) -> None:
                 )
                 .properties(height=240)
             )
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(style_chart(chart, theme_mode), use_container_width=True)
         else:
             st.caption("Aucune exposition.")
 
-    st.markdown("###### Répartition par niveau de risque")
+    st.markdown("<div class='eyebrow'>Synthèse</div><div class='page-title' style='font-size:1.1rem'>Répartition par niveau de risque</div>", unsafe_allow_html=True)
     level_counts = df["Niveau"].value_counts().reindex(
         ["Critique", "Élevé", "Modéré", "Sain"]).fillna(0).reset_index()
     level_counts.columns = ["Niveau", "Nombre"]
     domain = ["Critique", "Élevé", "Modéré", "Sain"]
-    rng = [RISK_COLORS[k] for k in domain]
+    risk = tokens(theme_mode).risk
+    rng = [risk[k] for k in domain]
     chart = (
         alt.Chart(level_counts).mark_bar(cornerRadius=4)
         .encode(
@@ -104,4 +107,4 @@ def render(ctx) -> None:
         )
         .properties(height=240)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(style_chart(chart, theme_mode), use_container_width=True)

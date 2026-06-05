@@ -122,8 +122,7 @@ def render(ctx) -> None:
                 st.markdown(
                     f"<div class='ring-card'><div class='h'>Réseau de {r['size']} comptes "
                     f"· {r['merchant']} ({r['country']})</div>"
-                    f"<div style='color:#a1a1aa;font-size:.85rem;margin-top:4px'>"
-                    f"Membres : {', '.join(r['members'])}<br>"
+                    f"<div class='sub'>Membres : {', '.join(r['members'])}<br>"
                     f"Transactions : {', '.join(r['transactions'])}</div></div>",
                     unsafe_allow_html=True,
                 )
